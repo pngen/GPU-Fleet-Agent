@@ -1,0 +1,14 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# GPU Fleet Agent depends on the NVIDIA CUDA runtime and driver only when it was
+# built with CUDA support. Those targets are exported by the CUDA toolkit's own
+# CMake package, so re-locate them on the consuming side.
+if(@GPUFLEETAGENT_HAVE_CUDA@)
+  find_dependency(CUDAToolkit)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/GPUFleetAgentTargets.cmake")
+
+check_required_components(GPUFleetAgent)

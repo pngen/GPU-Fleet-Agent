@@ -1,0 +1,47 @@
+# Build directories
+build*/
+cmake-build-*/
+_install/
+_install-*/
+
+# CMake user files
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+cmake_install.cmake
+*.cmake.stamp
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+*.ipch
+
+# CUDA / NVCC transient
+*.i
+*.ii
+*.cudafe*
+*.fatbin*
+*.cubin
+*.module
+
+# Runtime/state artifacts written by the CLI and tests
+*.gfle.bin
+*.gfle.state
+*.gfle.store
+
+# Misc
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+
+# Editor
+*.swp
+.DS_Store
+Thumbs.db
+*~

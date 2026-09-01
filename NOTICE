@@ -1,0 +1,18 @@
+GPU Fleet Agent
+Copyright 2026 Summon Software Labs
+
+This product is licensed under the Apache License, Version 2.0.
+
+This product includes software developed at Summon Software Labs.
+
+This product is built with and depends on the NVIDIA CUDA Toolkit for
+accelerator enumeration, probing, and validation on NVIDIA CUDA-capable
+devices. CUDA is a trademark of NVIDIA Corporation.
+
+This product optionally integrates with the NVIDIA Management Library (NVML)
+where it is present on the host. When NVML is absent the runtime continues
+to function using the CUDA Runtime and CUDA Driver APIs alone; NVML is an
+optional integration and its absence is not a runtime failure.
+
+No telemetry, analytics, or network-beaconing code is included in this
+product. GPU Fleet Agent performs no data transmission to third parties.

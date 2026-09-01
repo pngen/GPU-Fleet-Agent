@@ -1,0 +1,3 @@
+add_executable(gpufleet_benchmark benchmark.cpp)
+target_link_libraries(gpufleet_benchmark PRIVATE gpufleet)
+target_include_directories(gpufleet_benchmark PRIVATE ${CMAKE_SOURCE_DIR})
