@@ -28,6 +28,12 @@ namespace gpufleet {
 
 inline constexpr std::uint32_t kStoreMagic = 0x47464C45u;  // "GFLE"
 
+namespace detail {
+/// Makes `from` the file at `to` in one step, replacing any existing `to`; on
+/// failure `to` is left as it was (src/persistence/store.cpp).
+bool replace_file_atomically(const std::string& from, const std::string& to);
+}  // namespace detail
+
 /// Deterministic digest (CRC-32) of the canonical snapshot payload. Used by
 /// the recovery proof to compare a reconstructed state to a persisted state.
 inline std::uint32_t snapshot_digest(const StateSnapshot& s) {
@@ -60,14 +66,11 @@ inline Result<void> save_snapshot(const std::string& path, const StateSnapshot& 
     std::remove(tmp.c_str());
     return error_result(Status::Io, "failed to write store file");
   }
-  // Atomic replacement.
-  if (std::rename(tmp.c_str(), path.c_str()) != 0) {
-    // On Windows, rename fails if destination exists; use remove+rename best effort.
-    std::remove(path.c_str());
-    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
-      std::remove(tmp.c_str());
-      return error_result(Status::Io, "failed to atomically replace store file");
-    }
+  // Atomic replacement: the previous state file stays in place until the new
+  // one takes its name (never remove-then-rename).
+  if (!detail::replace_file_atomically(tmp, path)) {
+    std::remove(tmp.c_str());
+    return error_result(Status::Io, "failed to atomically replace store file");
   }
   return ok_result();
 }

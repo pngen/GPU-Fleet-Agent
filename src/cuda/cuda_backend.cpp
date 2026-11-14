@@ -15,6 +15,7 @@ namespace gpufleet {
 
 namespace {
 std::string arch_for(std::uint32_t major, std::uint32_t minor) {
+  (void)minor;   // the family is determined by the major version alone
   if (major >= 12) return "blackwell";
   if (major == 9) return "hopper";
   if (major == 8) return "ampere";

@@ -25,6 +25,11 @@ foreach(t IN LISTS TESTS)
 endforeach()
 
 # Concurrency / property tests (fixed seeds, printed).
+add_executable(test_regression test_regression.cpp)
+target_link_libraries(test_regression PRIVATE gpufleet ws2_32)
+target_include_directories(test_regression PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME test_regression COMMAND test_regression)
+
 add_executable(test_property test_property.cpp)
 target_link_libraries(test_property PRIVATE gpufleet)
 target_include_directories(test_property PRIVATE ${CMAKE_SOURCE_DIR})

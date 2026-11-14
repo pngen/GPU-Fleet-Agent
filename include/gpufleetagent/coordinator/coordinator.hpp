@@ -51,7 +51,10 @@ class Coordinator {
   void accept_loop();
   void handle_connection(TcpStream stream);
   void liveness_loop();
-  void dispatch(TcpStream& stream, const Message& msg);
+  struct Binding { WorkerId worker{}; WorkerBootId boot{}; };
+  // Handles one message; returns true when it accepted a registration, whose
+  // worker and boot are stored in `registered`.
+  bool dispatch(TcpStream& stream, const Message& msg, Binding& registered);
   void send_message(TcpStream& stream, const Message& msg);
   void respond_ack(TcpStream& stream, const Message& req, bool ok, const std::string& reason);
 

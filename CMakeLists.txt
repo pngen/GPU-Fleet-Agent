@@ -69,6 +69,7 @@ set(GPUFLEETAGENT_SOURCES
   src/coordinator/coordinator.cpp
   src/agent/agent.cpp
   src/device/synthetic_backend.cpp
+  src/persistence/store.cpp
   src/cuda/cuda_disabled.cpp
 )
 

@@ -84,6 +84,7 @@ void Coordinator::handle_connection(TcpStream stream) {
   Frame pending;
   std::string perr;
   WorkerId connected_worker{};
+  WorkerBootId connected_boot{};
   bool worker_bound = false;
 
   while (running_.load()) {
@@ -107,9 +108,11 @@ void Coordinator::handle_connection(TcpStream stream) {
         return;
       }
       Message msg = dm.move_value();
-      dispatch(stream, msg);
-      if (msg.type == MessageType::REGISTER) {
-        connected_worker = msg.worker;
+      Binding registered;
+      if (dispatch(stream, msg, registered)) {
+        // Only an accepted registration binds this connection to a worker.
+        connected_worker = registered.worker;
+        connected_boot = registered.boot;
         worker_bound = true;
       }
       res = dec.feed(std::span<const std::uint8_t>(), pending, perr);
@@ -122,10 +125,11 @@ void Coordinator::handle_connection(TcpStream stream) {
   }
 
   // Connection closed. If a worker was registered on this connection and is
-  // still authoritative, mark it lost.
+  // still authoritative, mark it lost -- but only while it is still the
+  // incarnation registered here (a superseded boot must not fence its successor).
   if (worker_bound && running_.load()) {
     std::int64_t now = clock_.now();
-    store_.mark_worker_lost(connected_worker, now);
+    store_.mark_worker_lost(connected_worker, connected_boot, now);
   }
 }
 
@@ -137,14 +141,14 @@ void Coordinator::liveness_loop() {
     for (const auto& [wid, wr] : snap.workers) {
       if (wr.alive && !wr.lost && !wr.fenced && wr.last_heartbeat != kInvalidTimestamp) {
         if (now - wr.last_heartbeat > opts_.heartbeat_timeout_ms) {
-          store_.mark_worker_lost(wid, now);
+          store_.mark_worker_lost(wid, wr.boot, now);   // not a successor registered since the snapshot
         }
       }
     }
   }
 }
 
-void Coordinator::dispatch(TcpStream& stream, const Message& msg) {
+bool Coordinator::dispatch(TcpStream& stream, const Message& msg, Binding& registered) {
   Timestamp now = clock_.now();
 
   switch (msg.type) {
@@ -156,18 +160,18 @@ void Coordinator::dispatch(TcpStream& stream, const Message& msg) {
       ack.request_id = msg.request_id;
       ack.ok = true;
       send_message(stream, ack);
-      return;
+      return false;
     }
     case MessageType::REGISTER: {
       auto reg = decode_registration(msg.payload);
       if (!reg.ok()) {
         respond_ack(stream, msg, false, "malformed registration: " + reg.error().message);
-        return;
+        return false;
       }
       auto r = store_.register_worker(reg.value(), now);
       if (!r.ok()) {
         respond_ack(stream, msg, false, "registration rejected: " + r.error().message);
-        return;
+        return false;
       }
       Message ack;
       ack.type = MessageType::REGISTER_ACK;
@@ -179,29 +183,30 @@ void Coordinator::dispatch(TcpStream& stream, const Message& msg) {
       ByteWriter w; w.u64(reg.value().registration_generation.value()); w.u64(store_.epoch().value());
       ack.payload = w.take();
       send_message(stream, ack);
-      return;
+      registered = Binding{reg.value().worker, reg.value().worker_boot};
+      return true;
     }
     case MessageType::HEARTBEAT: {
       if (!msg.worker_boot.is_zero() || !msg.worker.is_zero()) {
         // normal worker heartbeat
         auto r = store_.heartbeat(msg.worker, msg.worker_boot, msg.epoch, now, msg.health_gen);
-        if (!r.ok()) { respond_ack(stream, msg, false, r.error().message); return; }
+        if (!r.ok()) { respond_ack(stream, msg, false, r.error().message); return false; }
         respond_ack(stream, msg, true, "");
-        return;
+        return false;
       }
       respond_ack(stream, msg, true, "");
-      return;
+      return false;
     }
     case MessageType::DEVICE_SNAPSHOT:
     case MessageType::HEALTH_REPORT:
     case MessageType::CAPABILITY_REPORT: {
       auto obs = decode_observation_batch(msg.payload);
-      if (!obs.ok()) { respond_ack(stream, msg, false, "malformed observation batch"); return; }
+      if (!obs.ok()) { respond_ack(stream, msg, false, "malformed observation batch"); return false; }
       ObservationPolicy policy;
       auto r = store_.ingest_snapshot(msg.worker, obs.value(), policy, now);
-      if (!r.ok()) { respond_ack(stream, msg, false, r.error().message); return; }
+      if (!r.ok()) { respond_ack(stream, msg, false, r.error().message); return false; }
       respond_ack(stream, msg, true, "");
-      return;
+      return false;
     }
     case MessageType::SNAPSHOT_REQUEST: {
       StateSnapshot snap = store_.snapshot();
@@ -212,12 +217,12 @@ void Coordinator::dispatch(TcpStream& stream, const Message& msg) {
       resp.payload = encode_snapshot(snap);
       resp.ok = true;
       send_message(stream, resp);
-      return;
+      return false;
     }
     case MessageType::DRAIN:
     case MessageType::UNDRAIN: {
       auto t = decode_drain_target(msg.payload);
-      if (!t.ok()) { respond_ack(stream, msg, false, "malformed drain target"); return; }
+      if (!t.ok()) { respond_ack(stream, msg, false, "malformed drain target"); return false; }
       std::string identity = t.value().identity;
       DrainState ds = t.value().level;
       auto snap = store_.snapshot();
@@ -227,13 +232,13 @@ void Coordinator::dispatch(TcpStream& stream, const Message& msg) {
         if (!owner.is_zero()) break;
       }
       auto r = store_.set_drain(owner, identity, ds, now);
-      if (!r.ok()) { respond_ack(stream, msg, false, r.error().message); return; }
+      if (!r.ok()) { respond_ack(stream, msg, false, r.error().message); return false; }
       respond_ack(stream, msg, true, "");
-      return;
+      return false;
     }
     case MessageType::QUARANTINE: {
       auto q = decode_quarantine(msg.payload);
-      if (!q.ok()) { respond_ack(stream, msg, false, "malformed quarantine"); return; }
+      if (!q.ok()) { respond_ack(stream, msg, false, "malformed quarantine"); return false; }
       auto snap = store_.snapshot();
       WorkerId owner{};
       for (const auto& [wid, wr] : snap.workers) {
@@ -248,29 +253,29 @@ void Coordinator::dispatch(TcpStream& stream, const Message& msg) {
       rec.authority = store_.epoch();
       DeviceId did{};
       auto r = store_.set_quarantine(owner, q.value().identity, rec, now);
-      if (!r.ok()) { respond_ack(stream, msg, false, r.error().message); return; }
+      if (!r.ok()) { respond_ack(stream, msg, false, r.error().message); return false; }
       respond_ack(stream, msg, true, "");
-      return;
+      return false;
     }
     case MessageType::CLEAR_QUARANTINE: {
       auto identity = decode_identity_target(msg.payload);
-      if (!identity.ok()) { respond_ack(stream, msg, false, "malformed clear target"); return; }
+      if (!identity.ok()) { respond_ack(stream, msg, false, "malformed clear target"); return false; }
       auto r = store_.clear_quarantine(WorkerId{}, identity.value(), store_.epoch(), now);
-      if (!r.ok()) { respond_ack(stream, msg, false, r.error().message); return; }
+      if (!r.ok()) { respond_ack(stream, msg, false, r.error().message); return false; }
       respond_ack(stream, msg, true, "");
-      return;
+      return false;
     }
     case MessageType::EPOCH_ROLL: {
       auto r = store_.roll_epoch(msg.epoch);
-      if (!r.ok()) { respond_ack(stream, msg, false, r.error().message); return; }
+      if (!r.ok()) { respond_ack(stream, msg, false, r.error().message); return false; }
       respond_ack(stream, msg, true, "");
-      return;
+      return false;
     }
     case MessageType::SAVE: {
       auto r = save_state();
-      if (!r.ok()) { respond_ack(stream, msg, false, r.error().message); return; }
+      if (!r.ok()) { respond_ack(stream, msg, false, r.error().message); return false; }
       respond_ack(stream, msg, true, "");
-      return;
+      return false;
     }
     case MessageType::ACK:
     case MessageType::ERROR:
@@ -278,7 +283,7 @@ void Coordinator::dispatch(TcpStream& stream, const Message& msg) {
     case MessageType::SNAPSHOT_RESPONSE:
     default:
       respond_ack(stream, msg, false, "unexpected message type");
-      return;
+      return false;
   }
 }
 

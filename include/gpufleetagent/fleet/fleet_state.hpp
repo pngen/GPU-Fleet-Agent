@@ -141,6 +141,7 @@ class FleetStateStore {
         wr.last_heartbeat = now;
         wr.alive = true;
         wr.lost = false;
+        wr.fenced = false;   // the current incarnation re-affirmed (it was not superseded)
         update_worker_devices_locked(wr, reg.enumerated_devices);
         return ok_result(RegistrationId(reg.registration_generation.value() + 1));
       }
@@ -207,27 +208,23 @@ class FleetStateStore {
     return ok_result();
   }
 
+  /// Marks `w` lost only while `boot` is still its registered incarnation: a
+  /// superseded incarnation's connection closing must not fence its successor.
+  Result<void> mark_worker_lost(WorkerId w, WorkerBootId boot, Timestamp now) {
+    (void)now;
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = workers_.find(w);
+    if (it == workers_.end() || it->second.boot != boot) return ok_result();
+    mark_worker_lost_locked(it->second);
+    return ok_result();
+  }
+
   Result<void> mark_worker_lost(WorkerId w, Timestamp now) {
     (void)now;
     std::lock_guard<std::mutex> lk(mu_);
     auto it = workers_.find(w);
     if (it == workers_.end()) return ok_result();
-    it->second.lost = true;
-    it->second.alive = false;
-    it->second.fenced = true;
-    // Mark its device observations stale/lost.
-    for (auto& d : it->second.device_identities) {
-      auto dit = devices_.find(d);
-      if (dit != devices_.end()) {
-        dit->second.observation_fresh = false;
-        if (dit->second.present) {
-          dit->second.present = false;
-          dit->second.health = HealthState::LOST;
-          dit->second.eligibility = EligibilityState::INELIGIBLE;
-          dit->second.eligibility_reasons = {EligibilityReason::WORKER_RESTART};
-        }
-      }
-    }
+    mark_worker_lost_locked(it->second);
     return ok_result();
   }
 
@@ -245,21 +242,29 @@ class FleetStateStore {
     std::set<std::string> seen_keys;
     AppliedObservation last{};
 
+    // The batch is applied all-or-nothing: every observation is gated and
+    // staged first, and nothing is committed if any of them is rejected.
+    std::map<std::string, DeviceState> staged;
+    std::vector<ChangeRecord> staged_changes;
+    std::vector<std::string> new_keys;
+    std::uint64_t accepted = 0;
+
     for (const auto& o : obs) {
       if (o.epoch != epoch_) return error_result(Status::Stale, "stale coordinator epoch in observation");
       if (o.source_worker_boot != wr.boot) return error_result(Status::Stale, "stale worker boot id in observation");
       if (o.source_worker != worker) return error_result(Status::IdentityMismatch, "observation worker identity mismatch");
 
       const std::string key = canonical_device_identity(o.identity);
+      auto sit = staged.find(key);
       auto dit = devices_.find(key);
-      DeviceState prior = (dit == devices_.end()) ? DeviceState{} : dit->second;
+      bool new_device = (sit == staged.end() && dit == devices_.end());
+      DeviceState prior = (sit != staged.end()) ? sit->second : (dit == devices_.end()) ? DeviceState{} : dit->second;
 
       // Generation monotonicity gate. Generations are scoped PER WORKER
       // INCARNATION: a fresh WorkerBootId (a new process incarnation) begins a
       // new generation sequence, so its observations are never blocked by a
       // higher generation left behind by a superseded incarnation. Only
       // observations from the SAME boot are gated against the prior state.
-      bool new_device = (dit == devices_.end());
       bool same_incarnation = !new_device && (o.source_worker_boot == prior.source_worker_boot);
       if (same_incarnation) {
         if (o.observation_generation <= prior.observation_generation) {
@@ -278,20 +283,21 @@ class FleetStateStore {
       AppliedObservation applied = apply_observation(prior, o, policy, now, epoch_);
       applied.state.health_generation = o.health_generation;
 
-      bool replaced = (dit != devices_.end());
-      devices_[key] = applied.state;
-      for (auto& c : applied.changes) {
-        change_log_.push_back(c);
-        if (change_log_.size() > kMaxChangeLog) change_log_.erase(change_log_.begin());
-      }
-      if (!replaced) {
-        // New device for this worker.
-        wr.device_identities.push_back(key);
-      }
+      staged[key] = applied.state;
+      for (auto& c : applied.changes) staged_changes.push_back(c);
+      if (new_device) new_keys.push_back(key);   // new device for this worker
       seen_keys.insert(key);
       last = std::move(applied);
-      ++accepted_observations_;
+      ++accepted;
     }
+
+    for (auto& [key, state] : staged) devices_[key] = std::move(state);
+    for (auto& c : staged_changes) {
+      change_log_.push_back(std::move(c));
+      if (change_log_.size() > kMaxChangeLog) change_log_.erase(change_log_.begin());
+    }
+    for (auto& key : new_keys) wr.device_identities.push_back(std::move(key));
+    accepted_observations_ += accepted;
 
     // Devices previously owned by this worker but no longer present => LOST.
     std::vector<std::string> to_remove;
@@ -424,6 +430,25 @@ class FleetStateStore {
 
  private:
   static constexpr std::size_t kMaxChangeLog = 10000;
+
+  void mark_worker_lost_locked(WorkerRecord& wr) {
+    wr.lost = true;
+    wr.alive = false;
+    wr.fenced = true;
+    // Mark its device observations stale/lost.
+    for (auto& d : wr.device_identities) {
+      auto dit = devices_.find(d);
+      if (dit != devices_.end()) {
+        dit->second.observation_fresh = false;
+        if (dit->second.present) {
+          dit->second.present = false;
+          dit->second.health = HealthState::LOST;
+          dit->second.eligibility = EligibilityState::INELIGIBLE;
+          dit->second.eligibility_reasons = {EligibilityReason::WORKER_RESTART};
+        }
+      }
+    }
+  }
 
   void recompute_device_eligibility(DeviceState& d) const {
     EligibilityInput ei;

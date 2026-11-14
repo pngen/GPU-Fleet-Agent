@@ -69,8 +69,8 @@ template <>
 class Result<void> {
  public:
   Result() = default;                                           // NOLINT
-  Result(Error err) : error_(std::move(err)) {}                 // NOLINT
-  Result(Status code, std::string msg) : error_(Error{code, std::move(msg)}) {}
+  Result(Error err) : has_error_(true), error_(std::move(err)) {}   // NOLINT
+  Result(Status code, std::string msg) : has_error_(true), error_(Error{code, std::move(msg)}) {}
 
   bool ok() const noexcept { return !has_error_; }
   bool has_value() const noexcept { return ok(); }

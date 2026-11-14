@@ -14,13 +14,16 @@ namespace {
 constexpr int kElements = 1 << 20;   // 1 Mi elements => 4 MiB per buffer
 constexpr int kBlock = 256;
 constexpr std::uint64_t kMaxJustifiedDelta = 16ull * 1024 * 1024;  // bounded allowance
+}  // namespace
 
+// The kernel has external linkage: nvcc's host stub for a kernel with internal
+// linkage redeclares an extern symbol static (MSVC C4211).
+namespace cuda_validation_detail {
 __global__ void add_scaled_kernel(const float* in, float* out, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) out[i] = in[i] * 2.0f + 1.0f;
 }
-
-}  // namespace
+}  // namespace cuda_validation_detail
 
 CudaValidationResult run_cuda_validation(int ordinal) {
   CudaValidationResult r;
@@ -79,7 +82,7 @@ CudaValidationResult run_cuda_validation(int ordinal) {
   r.h2d_ok = true;
 
   int blocks = (kElements + kBlock - 1) / kBlock;
-  add_scaled_kernel<<<blocks, kBlock>>>(d_in, d_out, kElements);
+  cuda_validation_detail::add_scaled_kernel<<<blocks, kBlock>>>(d_in, d_out, kElements);
   e = cudaGetLastError();
   if (e != cudaSuccess) {
     fail("kernel launch failed: " + std::string(cudaGetErrorString(e)));

@@ -99,16 +99,22 @@ inline bool read_device_state(ByteReader& r, DeviceState& d) {
   if (!r.u64(u)) return false; d.generation = DeviceGeneration(u);
   if (!read_identity(r, d.identity)) return false;
   if (!r.u8(b)) return false; d.present = b != 0;
-  if (!r.u8(b)) return false; d.health = static_cast<HealthState>(b);
+  // Enum bytes outside their enumerators are rejected (a corrupt or crafted
+  // store must not load undefined states).
+  if (!r.u8(b) || b > static_cast<std::uint8_t>(HealthState::QUARANTINED)) return false;
+  d.health = static_cast<HealthState>(b);
   auto s = r.string(4096); if (!s.ok()) return false; d.health_explanation = s.move_value();
-  if (!r.u8(b)) return false; d.eligibility = static_cast<EligibilityState>(b);
+  if (!r.u8(b) || b > static_cast<std::uint8_t>(EligibilityState::QUARANTINED)) return false;
+  d.eligibility = static_cast<EligibilityState>(b);
   if (!r.u32(u32v)) return false;
   if (u32v > 32) return false;
   for (std::uint32_t k = 0; k < u32v; ++k) {
-    std::uint8_t rb; if (!r.u8(rb)) return false;
+    std::uint8_t rb;
+    if (!r.u8(rb) || rb > static_cast<std::uint8_t>(EligibilityReason::UNKNOWN)) return false;
     d.eligibility_reasons.push_back(static_cast<EligibilityReason>(rb));
   }
-  if (!r.u8(b)) return false; d.drain = static_cast<DrainState>(b);
+  if (!r.u8(b) || b > static_cast<std::uint8_t>(DrainState::DRAINED)) return false;
+  d.drain = static_cast<DrainState>(b);
   if (!r.u8(b)) return false; d.quarantined = b != 0;
   s = r.string(512); if (!s.ok()) return false; d.quarantine.reason = s.move_value();
   s = r.string(128); if (!s.ok()) return false; d.quarantine.source = s.move_value();
@@ -127,7 +133,8 @@ inline bool read_device_state(ByteReader& r, DeviceState& d) {
     Capability c;
     if (!r.u64(u)) return false; c.id = CapabilityId(u);
     s = r.string(128); if (!s.ok()) return false; c.name = s.move_value();
-    if (!r.u8(b)) return false; c.kind = static_cast<CapabilityKind>(b);
+    if (!r.u8(b) || b > static_cast<std::uint8_t>(CapabilityKind::INFERRED)) return false;
+    c.kind = static_cast<CapabilityKind>(b);
     s = r.string(256); if (!s.ok()) return false; c.value = s.move_value();
     s = r.string(256); if (!s.ok()) return false; c.description = s.move_value();
     d.capabilities.push_back(std::move(c));
@@ -267,7 +274,7 @@ inline Result<StateSnapshot> decode_snapshot(std::span<const std::uint8_t> data)
   for (std::uint32_t k = 0; k < u32v; ++k) {
     auto key = r.string(256); if (!key.ok()) return error_result(Status::Truncated, "device key truncated");
     DeviceState d;
-    if (!read_device_state(r, d)) return error_result(Status::Truncated, "device state truncated");
+    if (!read_device_state(r, d)) return error_result(Status::Truncated, "device state truncated or invalid enum");
     if (s.devices.count(key.value())) return error_result(Status::Duplicate, "duplicate device key");
     s.devices.emplace(key.move_value(), std::move(d));
   }
@@ -276,6 +283,9 @@ inline Result<StateSnapshot> decode_snapshot(std::span<const std::uint8_t> data)
   for (std::uint32_t k = 0; k < u32v; ++k) {
     ChangeRecord c;
     if (!r.u8(b)) return error_result(Status::Truncated, "change kind truncated");
+    if (b < static_cast<std::uint8_t>(ChangeKind::DEVICE_APPEARED) ||
+        b > static_cast<std::uint8_t>(ChangeKind::QUARANTINE_CLEARED))
+      return error_result(Status::InvalidEnum, "invalid change kind");
     c.kind = static_cast<ChangeKind>(b);
     if (!r.u64(u)) return error_result(Status::Truncated, "change device truncated");
     c.device_id = DeviceId(u);
